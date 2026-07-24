@@ -33,6 +33,7 @@ const (
 	// Default values for random scheduling when crypto/rand fails
 	defaultRandomHour   = 2
 	defaultRandomMinute = 30
+	catchupHistoryDays  = 7
 )
 
 // Init initializes EPG generation and schedules it for the next day.
@@ -142,7 +143,11 @@ func genXML() ([]byte, error) {
 
 		resp := fasthttp.AcquireResponse()
 
-		for offset := 0; offset < 2; offset++ {
+		firstOffset := 0
+		if channel.Catchup {
+			firstOffset = -catchupHistoryDays
+		}
+		for offset := firstOffset; offset < 2; offset++ {
 			reqUrl := fmt.Sprintf(EPG_URL, offset, channel.ID)
 			req.SetRequestURI(reqUrl)
 
@@ -198,6 +203,7 @@ func genXML() ([]byte, error) {
 		channels = append(channels, Channel{
 			ID:      channel.ChannelID,
 			Display: channel.ChannelName,
+			Catchup: channel.IsCatchupAvailable,
 		})
 	}
 	utils.Log.Println("Fetched", len(channels), "channels")

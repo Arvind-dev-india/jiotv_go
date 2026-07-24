@@ -25,13 +25,13 @@ import (
 )
 
 var (
-	TV               *television.Television
-	DisableTSHandler bool
-	isLogoutDisabled bool
-	Title            string
-	EnableDRM        bool
-	SONY_LIST        = []string{"154", "155", "162", "289", "291", "471", "474", "476", "483", "514", "524", "525", "697", "872", "873", "874", "891", "892", "1146", "1393", "1772", "1773", "1774", "1775"}
-	renderHDNEACache sync.Map
+	TV                *television.Television
+	DisableTSHandler  bool
+	isLogoutDisabled  bool
+	Title             string
+	EnableDRM         bool
+	SONY_LIST         = []string{"154", "155", "162", "289", "291", "471", "474", "476", "483", "514", "524", "525", "697", "872", "873", "874", "891", "892", "1146", "1393", "1772", "1773", "1774", "1775"}
+	renderHDNEACache  sync.Map
 	tokenRefreshGroup singleflight.Group
 )
 
@@ -995,8 +995,9 @@ func ChannelsHandler(c *fiber.Ctx) error {
 			default:
 				groupTitle = television.CategoryMap[channel.Category]
 			}
-			m3uContent += fmt.Sprintf("#EXTINF:-1 tvg-id=%q tvg-name=%q tvg-logo=%q tvg-language=%q tvg-type=%q group-title=%q, %s\n%s\n",
-				channel.ID, channel.Name, channelLogoURL, television.LanguageMap[channel.Language], television.CategoryMap[channel.Category], groupTitle, channel.Name, channelURL)
+			catchupAttributes := buildCatchupAttributes(hostURL, channel)
+			m3uContent += fmt.Sprintf("#EXTINF:-1 tvg-id=%q tvg-name=%q tvg-logo=%q tvg-language=%q tvg-type=%q group-title=%q%s, %s\n%s\n",
+				channel.ID, channel.Name, channelLogoURL, television.LanguageMap[channel.Language], television.CategoryMap[channel.Category], groupTitle, catchupAttributes, channel.Name, channelURL)
 		}
 
 		// Set the Content-Disposition header for file download
@@ -1010,6 +1011,14 @@ func ChannelsHandler(c *fiber.Ctx) error {
 	}
 
 	return c.JSON(apiResponse)
+}
+
+func buildCatchupAttributes(hostURL string, channel television.Channel) string {
+	if !channel.IsCatchupAvailable {
+		return ""
+	}
+	source := fmt.Sprintf("%s/catchup/stream/%s?start={utc}&end={utcend}", hostURL, channel.ID)
+	return fmt.Sprintf(" catchup=%q catchup-days=%q catchup-source=%q", "default", strconv.Itoa(catchupDays), source)
 }
 
 // PlayHandler loads HTML Page with video player iframe embedded with video URL

@@ -21,6 +21,7 @@ const (
 	okhttpUserAgent = "okhttp/4.12.13"
 	defaultLangID   = 6
 	epochThreshold  = 100000000000
+	catchupDays     = 7
 )
 
 func CatchupHandler(c *fiber.Ctx) error {
@@ -76,7 +77,7 @@ func CatchupHandler(c *fiber.Ctx) error {
 
 	currentDate := time.Now().In(loc).AddDate(0, 0, offset).Format("02/01/2006")
 	showNext := offset < 0
-	showPrev := offset > -7
+	showPrev := offset > -catchupDays
 
 	return c.Render("views/catchup", fiber.Map{
 		"Title":       Title,
@@ -100,24 +101,30 @@ func CatchupStreamHandler(c *fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "Missing start or end time")
 	}
 
-	if err := EnsureFreshTokens(); err != nil {
-		pkgUtils.Log.Printf("Failed to ensure fresh tokens: %v", err)
+	startMillis, startFormatted, err := normalizeCatchupTime(start)
+	if err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "Invalid catchup start time")
+	}
+	endMillis, endFormatted, err := normalizeCatchupTime(end)
+	if err != nil || endMillis <= startMillis {
+		return fiber.NewError(fiber.StatusBadRequest, "Invalid catchup end time")
 	}
 
 	srno := c.Query("srno")
 	if srno == "" {
-		pkgUtils.Log.Println("Warning: srno is missing for catchup request")
+		srno, err = resolveCatchupSerial(id, startMillis, endMillis)
+		if err != nil {
+			pkgUtils.Log.Printf("Failed to resolve catchup programme for channel %s: %v", id, err)
+			return fiber.NewError(fiber.StatusBadGateway, "Could not resolve catchup programme")
+		}
 	}
 
-	startInt, errStart := strconv.ParseInt(start, 10, 64)
-	endInt, errEnd := strconv.ParseInt(end, 10, 64)
-	if errStart == nil && errEnd == nil {
-		start = time.UnixMilli(startInt).UTC().Format("20060102T150405")
-		end = time.UnixMilli(endInt).UTC().Format("20060102T150405")
+	if err := EnsureFreshTokens(); err != nil {
+		pkgUtils.Log.Printf("Failed to ensure fresh tokens: %v", err)
 	}
 
-	pkgUtils.Log.Printf("Fetching catchup URL for channel %s, start: %s, end: %s, srno: %s", id, start, end, srno)
-	catchupResult, err := TV.GetCatchupURL(id, srno, start, end)
+	pkgUtils.Log.Printf("Fetching catchup URL for channel %s, start: %s, end: %s, srno: %s", id, startFormatted, endFormatted, srno)
+	catchupResult, err := TV.GetCatchupURL(id, srno, startFormatted, endFormatted)
 	if err != nil {
 		pkgUtils.Log.Printf("Error fetching catchup URL: %v", err)
 		return internalUtils.InternalServerError(c, err)
@@ -144,6 +151,128 @@ func CatchupStreamHandler(c *fiber.Ctx) error {
 		redirectURL += "&hdnea=" + catchupResult.Hdnea
 	}
 	return c.Redirect(redirectURL, fiber.StatusFound)
+}
+
+func normalizeCatchupTime(value string) (int64, string, error) {
+	for _, layout := range []string{"20060102T150405", "20060102150405"} {
+		parsed, err := time.ParseInLocation(layout, value, time.UTC)
+		if err == nil {
+			return parsed.UnixMilli(), parsed.Format("20060102T150405"), nil
+		}
+	}
+
+	if epoch, err := strconv.ParseInt(value, 10, 64); err == nil {
+		if epoch < epochThreshold {
+			epoch *= 1000
+		}
+		if epoch <= 0 {
+			return 0, "", fmt.Errorf("invalid epoch %q", value)
+		}
+		parsed := time.UnixMilli(epoch).UTC()
+		return epoch, parsed.Format("20060102T150405"), nil
+	}
+	return 0, "", fmt.Errorf("unsupported catchup time %q", value)
+}
+
+func resolveCatchupSerial(channelID string, startMillis, endMillis int64) (string, error) {
+	offset := catchupDayOffset(startMillis, time.Now())
+	if offset > 0 || offset < -catchupDays {
+		return "", fmt.Errorf("programme offset %d is outside the catchup window", offset)
+	}
+
+	offsets := []int{offset}
+	if offset > -catchupDays {
+		offsets = append(offsets, offset-1)
+	}
+	if offset < 0 {
+		offsets = append(offsets, offset+1)
+	}
+
+	for _, candidateOffset := range offsets {
+		epgData, err := getCatchupEPG(channelID, candidateOffset)
+		if err != nil {
+			continue
+		}
+		if srno, ok := findCatchupSerial(epgData, startMillis, endMillis); ok {
+			return srno, nil
+		}
+	}
+	return "", fmt.Errorf("no matching programme found")
+}
+
+func catchupDayOffset(startMillis int64, now time.Time) int {
+	location, err := time.LoadLocation("Asia/Kolkata")
+	if err != nil {
+		location = time.FixedZone("IST", 5*60*60+30*60)
+	}
+	start := time.UnixMilli(startMillis).In(location)
+	current := now.In(location)
+	startDay := time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, location)
+	currentDay := time.Date(current.Year(), current.Month(), current.Day(), 0, 0, 0, 0, location)
+	return int(startDay.Sub(currentDay).Hours() / 24)
+}
+
+func findCatchupSerial(epgData []map[string]interface{}, startMillis, endMillis int64) (string, bool) {
+	const tolerance = int64(90 * time.Second / time.Millisecond)
+	for _, programme := range epgData {
+		programmeStart, startOK := catchupInt64(programme["startEpoch"])
+		programmeEnd, endOK := catchupInt64(programme["endEpoch"])
+		if !startOK || !endOK {
+			continue
+		}
+		if programmeStart < epochThreshold {
+			programmeStart *= 1000
+		}
+		if programmeEnd < epochThreshold {
+			programmeEnd *= 1000
+		}
+		if absoluteDifference(programmeStart, startMillis) > tolerance ||
+			absoluteDifference(programmeEnd, endMillis) > tolerance {
+			continue
+		}
+		if srno, ok := catchupString(programme["srno"]); ok && srno != "" {
+			return srno, true
+		}
+	}
+	return "", false
+}
+
+func catchupInt64(value interface{}) (int64, bool) {
+	switch typed := value.(type) {
+	case int64:
+		return typed, true
+	case int:
+		return int64(typed), true
+	case float64:
+		return int64(typed), true
+	case string:
+		parsed, err := strconv.ParseInt(typed, 10, 64)
+		return parsed, err == nil
+	default:
+		return 0, false
+	}
+}
+
+func catchupString(value interface{}) (string, bool) {
+	switch typed := value.(type) {
+	case string:
+		return typed, true
+	case int64:
+		return strconv.FormatInt(typed, 10), true
+	case int:
+		return strconv.Itoa(typed), true
+	case float64:
+		return strconv.FormatInt(int64(typed), 10), true
+	default:
+		return "", false
+	}
+}
+
+func absoluteDifference(left, right int64) int64 {
+	if left > right {
+		return left - right
+	}
+	return right - left
 }
 
 func CatchupPlayerHandler(c *fiber.Ctx) error {

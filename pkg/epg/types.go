@@ -11,6 +11,7 @@ type Channel struct {
 	XMLName xml.Name `xml:"channel"`      // XML tag name
 	ID      int      `xml:"id,attr"`      // ID is attribute of channel tag
 	Display string   `xml:"display-name"` // Display name of the channel
+	Catchup bool     `xml:"-"`            // Include historical EPG data for catchup channels
 }
 
 // Icon XML tag for Programme XML tag in EPG
@@ -66,9 +67,10 @@ type EPG struct {
 
 // ChannelObject represents Individual channel detail from JioTV API response
 type ChannelObject struct {
-	ChannelID   int    `json:"channel_id"`   // Channel ID
-	ChannelName string `json:"channel_name"` // Channel name
-	LogoURL     string `json:"logoUrl"`      // Channel logo URL
+	ChannelID          int    `json:"channel_id"`         // Channel ID
+	ChannelName        string `json:"channel_name"`       // Channel name
+	LogoURL            string `json:"logoUrl"`            // Channel logo URL
+	IsCatchupAvailable bool   `json:"isCatchupAvailable"` // Historical playback support
 }
 
 // ChannelsResponse represents Channel details from JioTV API response
